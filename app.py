@@ -26,6 +26,16 @@ if data_source == "Upload my own sales data":
         "Upload a CSV with two columns: a **date** column and a **sales "
         "amount** column (any column names are fine — you'll map them below)."
     )
+
+    sample = pd.DataFrame({'Date': ['2024-01-01', '2024-01-02', '2024-01-03'],
+                            'Sales': [120.50, 89.00, 210.75]})
+    st.download_button(
+        "📄 Download a sample CSV format",
+        sample.to_csv(index=False),
+        "sample_format.csv",
+        "text/csv"
+    )
+
     uploaded_file = st.file_uploader("Upload your sales CSV", type=["csv"])
 
     if uploaded_file is not None:
@@ -39,8 +49,24 @@ if data_source == "Upload my own sales data":
         with col2:
             sales_col = st.selectbox("Which column is the sales amount?", raw_df.columns)
 
+        # Clean sales column: strip currency symbols, commas, spaces before converting to numbers
+        raw_df[sales_col] = (
+            raw_df[sales_col]
+            .astype(str)
+            .str.replace(r'[^0-9.\-]', '', regex=True)
+        )
+        raw_df[sales_col] = pd.to_numeric(raw_df[sales_col], errors='coerce')
+
         # Prepare and aggregate the uploaded data
         raw_df[date_col] = pd.to_datetime(raw_df[date_col], errors='coerce')
+
+        if raw_df[date_col].isna().all():
+            st.error(
+                "Couldn't read any valid dates from that column. Please "
+                "check the date format and try again."
+            )
+            st.stop()
+
         raw_df = raw_df.dropna(subset=[date_col, sales_col])
 
         historical = (
@@ -50,7 +76,13 @@ if data_source == "Upload my own sales data":
         )
         historical.columns = ['ds', 'y']
 
-        if len(historical) < 8:
+        if len(historical) < 3:
+            st.error(
+                "Not enough historical data to forecast reliably. Please "
+                "upload at least 3 months of sales history."
+            )
+            st.stop()
+        elif len(historical) < 8:
             st.warning(
                 "This dataset has very few months of history. Prophet "
                 "generally needs at least ~12-24 months of data for a "
@@ -66,9 +98,10 @@ if data_source == "Upload my own sales data":
 
 else:
     # ---- Demo mode: use the pre-trained Superstore model ----
-    model = joblib.load("sales_forecast_model.pkl")
-    historical = pd.read_csv("historical_sales.csv")
-    historical['ds'] = pd.to_datetime(historical['ds'])
+    with st.spinner("Loading demo model..."):
+        model = joblib.load("sales_forecast_model.pkl")
+        historical = pd.read_csv("historical_sales.csv")
+        historical['ds'] = pd.to_datetime(historical['ds'])
 
 st.divider()
 
@@ -91,15 +124,35 @@ ax.set_ylabel("Sales ($)")
 ax.legend()
 st.pyplot(fig)
 
+# ---- Headline metrics ----
+future_raw = forecast.tail(months_ahead)[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
+total_forecast = future_raw['yhat'].sum()
+
+metric_col1, metric_col2 = st.columns(2)
+with metric_col1:
+    st.metric(f"Total Predicted Sales (next {months_ahead} mo.)", f"${total_forecast:,.0f}")
+
+last_period_actual = historical['y'].tail(months_ahead).sum()
+if last_period_actual > 0:
+    growth_pct = ((total_forecast - last_period_actual) / last_period_actual) * 100
+    with metric_col2:
+        st.metric(
+            f"vs. Last {months_ahead} Month(s) (${last_period_actual:,.0f})",
+            f"{growth_pct:+.1f}%"
+        )
+
 # ---- Forecast table ----
 st.subheader(f"Next {months_ahead} Month(s) Forecast")
-future_only = forecast.tail(months_ahead)[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
+future_only = future_raw.copy()
 future_only.columns = ['Month', 'Predicted Sales', 'Low Estimate', 'High Estimate']
 future_only['Month'] = future_only['Month'].dt.strftime('%B %Y')
 st.dataframe(
     future_only.set_index('Month').style.format("${:,.0f}"),
     use_container_width=True
 )
+
+csv_download = future_only.to_csv(index=False).encode('utf-8')
+st.download_button("📥 Download Forecast as CSV", csv_download, "sales_forecast.csv", "text/csv")
 
 st.divider()
 
